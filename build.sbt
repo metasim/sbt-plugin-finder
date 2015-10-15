@@ -9,16 +9,11 @@ licenses += "MIT License" -> url("http://www.opensource.org/licenses/mit-license
 
 scalaVersion := "2.10.6"
 
-scalaVersion in Global := "2.10.6"
-
 scalacOptions ++= Seq("-deprecation", "-unchecked")
 
-
 libraryDependencies ++= Seq(
-  "net.caoticode.buhtig" %% "buhtig" % "0.3.1",
-  "org.json4s" %% "json4s-native" % "3.2.10" force(),
-  "org.slf4j" % "slf4j-api" % "1.7.12",
-  "ch.qos.logback" % "logback-classic" % "1.1.3"
+  "org.apache.httpcomponents" % "fluent-hc" % "4.5",
+  "org.json4s" %% "json4s-native" % "3.2.11"
 )
 
 scriptedSettings

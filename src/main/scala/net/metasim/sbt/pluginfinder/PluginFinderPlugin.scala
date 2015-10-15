@@ -1,12 +1,11 @@
 package net.metasim.sbt.pluginfinder
 
-import net.caoticode.buhtig.Buhtig
-import org.json4s.Extraction
-import org.json4s.JsonAST.{JField, JInt, JObject}
-import org.json4s.native.Serialization
-import sbt._
-import net.caoticode.buhtig.Converters._
+import org.apache.http.client.fluent.Request
+import org.apache.http.client.utils.URIBuilder
+import org.json4s.JsonAST.{JInt, JString}
 import org.json4s.native.JsonMethods._
+import sbt.Keys._
+import sbt._
 
 /**
  * Plugin to find sbt plugins on Github.
@@ -20,50 +19,79 @@ object PluginFinderPlugin extends AutoPlugin {
   override def trigger = allRequirements
 
   object autoImport {
-    case class PluginDescription(full_name :String, description: String)
+    case class PluginDescription(name :String, description: String, home_url: URL) {
+      def toMD: String = s"* [$name]($home_url) $description"
+      def toCSV: String = s"""$name,"$description",$home_url"""
+    }
+    val githubAPITokenFile = settingKey[File]("Path to file storing github token")
     val githubAPIToken = settingKey[String]("Github API access token. See https://github.com/settings/tokens")
-    val findPlugins = taskKey[Seq[PluginDescription]]("Search http://github.com for sbt plugins")
+    val githubSearchOrg =  settingKey[String]("User or organization name to search. Defaults to `sbt`")
+    val listPlugins = taskKey[Seq[PluginDescription]]("List plugins under the sbt organization")
+    val pluginReport = taskKey[String]("Format plugin results as a Markdown document.")
+    val showGithubPlugins = taskKey[Unit]("Show plugin report")
   }
   import autoImport._
 
   override def projectSettings = Seq(
-    githubAPIToken := "9130f936ad71836c97a7b9911cb8dca92ccd1ec5",
-    findPlugins := queryForPlugins(githubAPIToken.value)
+    githubSearchOrg := "sbt",
+    githubAPITokenFile := {
+      file(System.getProperty("user.home")) / ".sbt" / "github-api.token"
+    },
+    githubAPIToken := {
+      val tFile = githubAPITokenFile.value
+      if(tFile.exists) IO.read(githubAPITokenFile.value).trim
+      else "Get your token here: 'https://github.com/settings/tokens'"
+    },
+    listPlugins := queryForPlugins(githubSearchOrg.value, githubAPIToken.value, streams.value.log),
+    pluginReport := genReport(githubSearchOrg.value, listPlugins.value),
+    showGithubPlugins := {
+      val rpt = pluginReport.value
+      IO.write(target.value / "github-plugins.md", rpt)
+      streams.value.log.info(rpt)
+    }
   )
 
-  def queryForPlugins(apiToken: String): Seq[PluginDescription] = {
-    val buhtig = new Buhtig(apiToken)
-    val client = buhtig.syncClient
+  private val host = new URI("https://api.github.com")
+  private val codeAPI = host.resolve("/search/code")
 
-    val query = client.search.code ? ("q" -> "sbtPlugin user:sbt filename:build.sbt")
-    println("request: " + query.request.toRequest)
+  /** Query github for repos that look like they contain sbt plugins. */
+  def queryForPlugins(user: String, apiToken: String, logger: Logger): Seq[PluginDescription] = {
 
-    val result = query.getOpt[JSON]
-    println("result: " + result)
-    assert(result.isDefined)
+    val queryURI = new URIBuilder(codeAPI)
+      .addParameter("per_page", "100")
+      .addParameter("q", s"sbtPlugin user:$user filename:build.sbt path:/")
+      .build()
 
-//    val count = for {
-//      resp ← result
-//    } yield for {
-//        JObject(obj) ← resp
-//        JField ("total_count", JInt(cnt)) ← obj
-//      } yield cnt
+    logger.info("Submitting request: " + queryURI.toASCIIString)
+    val response = Request.Get(queryURI)
+      .addHeader("Authorization", "token " + apiToken)
+      .execute()
 
+    val result = parseOpt(response.returnContent().asStream())
+    assert(result.isDefined, "Error in parsing response")
 
     val plugins = for(resp ← result.toSeq) yield {
       val JInt(cnt) = result.get \ "total_count"
-      println("results count2: " + cnt)
 
       val repos = resp \ "items" \ "repository"
 
       for {
-        repo ← repos.children
-        //name = repo \ "full_name"
-        //description = repo \  "description"
-      } yield Serialization.read[PluginDescription](repo)
+        repo ← repos.children.toSeq
+        JString(name) ← repo \ "name"
+        JString(description) ← repo \  "description"
+        JString(url) ← repo \ "html_url"
+      } yield PluginDescription(name, description, new URL(url))
     }
 
-    client.close()
-    plugins.flatten
+    plugins.flatten.sortBy(_.name).filter(_.name != "sbt")
+  }
+
+
+  def genReport(user: String, plugins: Seq[PluginDescription]): String = {
+    val buf = new StringBuilder
+    buf.append("# Plugin Report\n\n")
+    buf.append(s"Found ${plugins.size} plugins under user/organization '$user'\n\n")
+    plugins.foreach(p ⇒ buf.append(p.toMD + "\n"))
+    buf.toString()
   }
 }
